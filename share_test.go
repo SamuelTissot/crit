@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"image/color"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1564,7 +1566,7 @@ func TestCommentToShareComment(t *testing.T) {
 			Author:      "Alice",
 			ReviewRound: 2,
 		}
-		sc := commentToShareComment(c, "main.go", "line", "", false, false)
+		sc := commentToShareComment(c, "main.go", "line", "", "", false, false)
 		if sc.File != "main.go" {
 			t.Errorf("File = %q, want main.go", sc.File)
 		}
@@ -1590,7 +1592,7 @@ func TestCommentToShareComment(t *testing.T) {
 
 	t.Run("includes resolved when flag set", func(t *testing.T) {
 		c := Comment{Resolved: true}
-		sc := commentToShareComment(c, "", "", "", true, false)
+		sc := commentToShareComment(c, "", "", "", "", true, false)
 		if !sc.Resolved {
 			t.Error("expected Resolved=true when includeResolved=true")
 		}
@@ -1598,7 +1600,7 @@ func TestCommentToShareComment(t *testing.T) {
 
 	t.Run("excludes resolved when flag not set", func(t *testing.T) {
 		c := Comment{Resolved: true}
-		sc := commentToShareComment(c, "", "", "", false, false)
+		sc := commentToShareComment(c, "", "", "", "", false, false)
 		if sc.Resolved {
 			t.Error("expected Resolved=false when includeResolved=false")
 		}
@@ -1606,7 +1608,7 @@ func TestCommentToShareComment(t *testing.T) {
 
 	t.Run("sets external ID when flag set", func(t *testing.T) {
 		c := Comment{ID: "c123"}
-		sc := commentToShareComment(c, "", "", "", false, true)
+		sc := commentToShareComment(c, "", "", "", "", false, true)
 		if sc.ExternalID != "c123" {
 			t.Errorf("ExternalID = %q, want c123", sc.ExternalID)
 		}
@@ -1614,7 +1616,7 @@ func TestCommentToShareComment(t *testing.T) {
 
 	t.Run("omits external ID when flag not set", func(t *testing.T) {
 		c := Comment{ID: "c123"}
-		sc := commentToShareComment(c, "", "", "", false, false)
+		sc := commentToShareComment(c, "", "", "", "", false, false)
 		if sc.ExternalID != "" {
 			t.Errorf("ExternalID = %q, want empty", sc.ExternalID)
 		}
@@ -1628,7 +1630,7 @@ func TestCommentToShareComment(t *testing.T) {
 				{Body: "verified", Author: "Alice"},
 			},
 		}
-		sc := commentToShareComment(c, "f.md", "", "", false, false)
+		sc := commentToShareComment(c, "f.md", "", "", "", false, false)
 		if len(sc.Replies) != 2 {
 			t.Fatalf("expected 2 replies, got %d", len(sc.Replies))
 		}
@@ -1639,9 +1641,50 @@ func TestCommentToShareComment(t *testing.T) {
 
 	t.Run("review round zero omitted", func(t *testing.T) {
 		c := Comment{ReviewRound: 0}
-		sc := commentToShareComment(c, "", "", "", false, false)
+		sc := commentToShareComment(c, "", "", "", "", false, false)
 		if sc.ReviewRound != 0 {
 			t.Errorf("ReviewRound = %d, want 0 (omitted for round 0)", sc.ReviewRound)
+		}
+	})
+
+	t.Run("inlines local attachments for share when critPath set", func(t *testing.T) {
+		review := newReviewIdentity(t)
+		data := makeTestPNG(t, color.RGBA{50, 100, 150, 255})
+		filename, err := saveAttachment(review, data)
+		if err != nil {
+			t.Fatalf("seed attachment: %v", err)
+		}
+		c := Comment{
+			Body: "look: ![bug.png](attachments/" + filename + ")",
+			Replies: []Reply{
+				{Body: "yes ![](attachments/" + filename + ")"},
+			},
+		}
+		sc := commentToShareComment(c, "main.go", "line", "", review, false, false)
+		if !strings.Contains(sc.Body, "data:image/png;base64,") {
+			t.Errorf("expected inlined data URI in body, got: %q", sc.Body)
+		}
+		if strings.Contains(sc.Body, "](attachments/") {
+			t.Errorf("body still references attachments/: %q", sc.Body)
+		}
+		if !strings.Contains(sc.Body, "![bug.png](") {
+			t.Errorf("alt text dropped during inline: %q", sc.Body)
+		}
+		if len(sc.Replies) != 1 {
+			t.Fatalf("expected 1 reply, got %d", len(sc.Replies))
+		}
+		if !strings.Contains(sc.Replies[0].Body, "data:image/png;base64,") {
+			t.Errorf("reply body not inlined: %q", sc.Replies[0].Body)
+		}
+	})
+
+	t.Run("leaves attachments alone when critPath empty", func(t *testing.T) {
+		uuid, _ := randomUUID()
+		body := "![](attachments/" + uuid + ".png)"
+		c := Comment{Body: body}
+		sc := commentToShareComment(c, "f.md", "line", "", "", false, false)
+		if sc.Body != body {
+			t.Errorf("body should be untouched without critPath, got: %q", sc.Body)
 		}
 	})
 }

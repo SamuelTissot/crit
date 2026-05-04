@@ -1043,7 +1043,13 @@ type ghReplyForPush struct {
 
 // collectNewRepliesForPush finds replies that haven't been pushed to GitHub yet.
 // A reply needs pushing if its GitHubID is 0 (local-only) and its parent Comment has a GitHubID (on GitHub).
-func collectNewRepliesForPush(cf CritJSONFile) []ghReplyForPush {
+//
+// rewrite handles image markdown in reply bodies — see bucketsToGHComments.
+// nil falls back to the strip rewriter.
+func collectNewRepliesForPush(cf CritJSONFile, rewrite bodyRewriter) []ghReplyForPush {
+	if rewrite == nil {
+		rewrite = stripBodyRewriter
+	}
 	var replies []ghReplyForPush
 	for _, c := range cf.Comments {
 		if c.GitHubID == 0 {
@@ -1053,7 +1059,7 @@ func collectNewRepliesForPush(cf CritJSONFile) []ghReplyForPush {
 			if r.GitHubID == 0 {
 				replies = append(replies, ghReplyForPush{
 					ParentGHID: c.GitHubID,
-					Body:       r.Body,
+					Body:       rewrite(r.Body),
 				})
 			}
 		}
@@ -1237,7 +1243,7 @@ func critJSONToGHComments(cj CritJSON) []map[string]any {
 				"path": path,
 				"line": c.EndLine,
 				"side": "RIGHT",
-				"body": c.Body,
+				"body": stripBodyRewriter(c.Body),
 			}
 			if c.StartLine != c.EndLine {
 				comment["start_line"] = c.StartLine

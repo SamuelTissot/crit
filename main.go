@@ -807,8 +807,10 @@ func runPushDryRun(ctx pushContext, b pushBuckets) {
 func runPushLive(ctx pushContext, b pushBuckets) int {
 	exportPath := writePushOrphanExport(ctx, b)
 
+	rewrite := stripBodyRewriter
+
 	postable := len(b.Postable)
-	posted, postFailed, postAuthFailed, commentIDs := runPushPostReview(ctx, b)
+	posted, postFailed, postAuthFailed, commentIDs := runPushPostReview(ctx, b, rewrite)
 
 	totalReplies := countNewReplies(ctx.cj)
 	postedReplies := 0
@@ -816,7 +818,7 @@ func runPushLive(ctx pushContext, b pushBuckets) int {
 	if !postFailed && !postAuthFailed {
 		var allReplies []ghReplyForPush
 		for _, cf := range ctx.cj.Files {
-			allReplies = append(allReplies, collectNewRepliesForPush(cf)...)
+			allReplies = append(allReplies, collectNewRepliesForPush(cf, rewrite)...)
 		}
 		var replyIDs map[replyKey]int64
 		replyIDs, postedReplies, replyAuthFailed = postPushReplies(ctx.prNumber, allReplies)
@@ -881,14 +883,16 @@ func writePushOrphanExport(ctx pushContext, b pushBuckets) string {
 }
 
 // runPushPostReview posts the Postable bucket as a single GitHub review.
+// rewrite preprocesses each comment body before it ships (image upload+swap
+// in production; nil falls back to strip-with-placeholder).
 // Returns the count posted, whether the call failed (any reason), whether
 // the failure was specifically an auth-rotation 401, and the path-to-id
 // mapping for body-hash bookkeeping.
-func runPushPostReview(ctx pushContext, b pushBuckets) (int, bool, bool, map[string]int64) {
+func runPushPostReview(ctx pushContext, b pushBuckets, rewrite bodyRewriter) (int, bool, bool, map[string]int64) {
 	if len(b.Postable) == 0 {
 		return 0, false, false, nil
 	}
-	ghComments := bucketsToGHComments(b.Postable)
+	ghComments := bucketsToGHComments(b.Postable, rewrite)
 	ids, err := createGHReview(ctx.prNumber, ghComments, ctx.flags.message, ctx.event)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error posting review: %v\n", err)
@@ -900,10 +904,11 @@ func runPushPostReview(ctx pushContext, b pushBuckets) (int, bool, bool, map[str
 // countNewReplies counts replies that would be sent in this push (no
 // GitHubID yet, parent already on GitHub). Mirrors collectNewRepliesForPush
 // without allocating the full slice — used purely for the K-of-N total.
+// nil rewriter is fine: the body content does not affect the count.
 func countNewReplies(cj CritJSON) int {
 	n := 0
 	for _, cf := range cj.Files {
-		n += len(collectNewRepliesForPush(cf))
+		n += len(collectNewRepliesForPush(cf, nil))
 	}
 	return n
 }
@@ -1710,8 +1715,8 @@ func removeStaleReviewPath(path string) bool {
 	return true
 }
 
-// cleanupOnApproval deletes the review file when the review is approved
-// and cleanup is enabled.
+// cleanupOnApproval deletes the review folder (review.json, snapshots.json,
+// and any attachments) when the review is approved and cleanup is enabled.
 func cleanupOnApproval(approved bool, reviewPath string, cleanupEnabled bool) {
 	if !(approved && cleanupEnabled && reviewPath != "") {
 		return

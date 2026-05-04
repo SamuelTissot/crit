@@ -282,7 +282,15 @@ func loadCommentsForShare(critPath string, filePaths []string, fallbackAuthor st
 // includeResolved and setExternalID flags. The filePath and scope fields are
 // set by the caller based on context. fallbackAuthor is used when c.Author is
 // empty (typically cfg.Author).
-func commentToShareComment(c Comment, filePath, scope, fallbackAuthor string, includeResolved, setExternalID bool) shareComment {
+//
+// critPath is the v4 review identity (folder); it's used to locate the
+// attachments dir so any attachments/<uuid>.<ext> markdown references in
+// the body (or its replies) get rewritten to data: URIs before the share
+// payload leaves the host. crit-web has no asset endpoint, so this
+// inlining is the only way pasted screenshots survive a share. Passing
+// "" disables inlining (used in unit tests that don't write attachments
+// to disk).
+func commentToShareComment(c Comment, filePath, scope, fallbackAuthor, critPath string, includeResolved, setExternalID bool) shareComment {
 	author := c.Author
 	if author == "" {
 		author = fallbackAuthor
@@ -291,7 +299,7 @@ func commentToShareComment(c Comment, filePath, scope, fallbackAuthor string, in
 		File:      filePath,
 		StartLine: c.StartLine,
 		EndLine:   c.EndLine,
-		Body:      c.Body,
+		Body:      inlineAttachmentsAsDataURIs(critPath, c.Body),
 		Quote:     c.Quote,
 		Author:    author,
 		UserID:    c.UserID,
@@ -311,7 +319,7 @@ func commentToShareComment(c Comment, filePath, scope, fallbackAuthor string, in
 		if ra == "" {
 			ra = fallbackAuthor
 		}
-		sr := shareReply{Body: r.Body, Author: ra, UserID: r.UserID}
+		sr := shareReply{Body: inlineAttachmentsAsDataURIs(critPath, r.Body), Author: ra, UserID: r.UserID}
 		if setExternalID {
 			sr.ExternalID = r.ID
 		}
@@ -355,14 +363,14 @@ func loadCommentsFromCritJSON(critPath string, filePaths []string, includeResolv
 				continue
 			}
 			scope := c.Scope
-			comments = append(comments, commentToShareComment(c, filePath, scope, fallbackAuthor, includeResolved, setExternalID))
+			comments = append(comments, commentToShareComment(c, filePath, scope, fallbackAuthor, critPath, includeResolved, setExternalID))
 		}
 	}
 	for _, c := range cj.ReviewComments {
 		if !includeResolved && c.Resolved {
 			continue
 		}
-		comments = append(comments, commentToShareComment(c, "", "review", fallbackAuthor, includeResolved, setExternalID))
+		comments = append(comments, commentToShareComment(c, "", "review", fallbackAuthor, critPath, includeResolved, setExternalID))
 	}
 	return comments, round
 }

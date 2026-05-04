@@ -36,6 +36,25 @@
     return '<span class="file-ref">' + escapeHtml(path) + '</span>';
   };
 
+  // ===== Attachment Image Src Rewrite =====
+  // Markdown stored in review.json uses canonical relative paths
+  // (`attachments/<uuid>.<ext>`) — never absolute URLs. Each render target
+  // rewrites at its own publish boundary; in the local UI that means
+  // pointing the browser at /api/attachments/<uuid>.<ext>. External URLs
+  // (https/http/data/absolute paths) pass through untouched so historical
+  // GitHub raw URLs or external image hosts still render after `crit pull`.
+  commentMd.renderer.rules.image = function(tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    const srcIdx = token.attrIndex('src');
+    if (srcIdx >= 0) {
+      const src = token.attrs[srcIdx][1];
+      if (!/^https?:\/\/|^data:|^\//.test(src) && /^attachments\//.test(src)) {
+        token.attrs[srcIdx][1] = '/api/' + src;
+      }
+    }
+    return self.renderToken(tokens, idx, options);
+  };
+
   // ===== Suggestion Diff Renderer =====
   function renderSuggestionDiff(suggestionContent, originalLines) {
     const sugLines = suggestionContent.replace(/\n$/, '').split('\n');
@@ -4544,6 +4563,107 @@
     }
   }
 
+  // ===== Image Paste =====
+  // Attach a paste handler to a comment textarea so screenshots and other
+  // images on the clipboard upload via POST /api/attachments and get
+  // inserted as markdown image references at the cursor.
+  //
+  // The inserted markdown carries the *relative* path returned by the
+  // server (`attachments/<uuid>.<ext>`) — that's the canonical form stored
+  // in review.json. The local UI's render-time hook (commentMd image rule
+  // above) rewrites it to /api/attachments/... at display time.
+  //
+  // While an upload is in flight a `![uploading…](crit-pending-N)`
+  // placeholder sits at the cursor; on success it's swapped for the real
+  // markdown reference, on failure for an italic _[image upload failed]_
+  // note. The placeholder tag is suffixed with a per-textarea counter so
+  // simultaneous pastes don't collide.
+  let pendingImagePasteSeq = 0;
+  function attachImagePaste(textarea) {
+    textarea.addEventListener('paste', function(event) {
+      const clipboard = event.clipboardData;
+      if (!clipboard) return;
+      const items = clipboard.items;
+      if (!items || items.length === 0) return;
+
+      const images = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind === 'file' && item.type && item.type.indexOf('image/') === 0) {
+          const file = item.getAsFile();
+          if (file) images.push(file);
+        }
+      }
+      if (images.length === 0) return;
+
+      // We're handling images — block the default paste so the raw bytes
+      // don't get dumped as garbage text into the textarea.
+      event.preventDefault();
+      images.forEach(function(file) { uploadAndInsertImage(textarea, file); });
+    });
+  }
+
+  function uploadAndInsertImage(textarea, file) {
+    const seq = ++pendingImagePasteSeq;
+    const placeholder = '![uploading…](crit-pending-' + seq + ')';
+    insertAtCursor(textarea, placeholder);
+
+    const formData = new FormData();
+    // Pass the original filename explicitly so it survives any clipboard
+    // that strips it from the File object. Server sanitizes server-side.
+    formData.append('file', file, file.name || '');
+
+    fetch('/api/attachments', { method: 'POST', body: formData })
+      .then(function(res) {
+        if (!res.ok) {
+          return res.text().then(function(msg) {
+            throw new Error(msg || ('Upload failed: ' + res.status));
+          });
+        }
+        return res.json();
+      })
+      .then(function(data) {
+        if (!data || !data.url) throw new Error('Malformed upload response');
+        const alt = (data.original_filename || '').trim();
+        replaceInTextarea(textarea, placeholder, '![' + alt + '](' + data.url + ')');
+      })
+      .catch(function(err) {
+        console.error('Image paste upload failed:', err);
+        replaceInTextarea(textarea, placeholder, '_[image upload failed]_');
+      });
+  }
+
+  function insertAtCursor(textarea, text) {
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const before = textarea.value.substring(0, start);
+    const after = textarea.value.substring(end);
+    textarea.value = before + text + after;
+    const cursor = start + text.length;
+    textarea.selectionStart = textarea.selectionEnd = cursor;
+    textarea.focus();
+    // Trigger input listeners (draft autosave, etc.)
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function replaceInTextarea(textarea, needle, replacement) {
+    const idx = textarea.value.indexOf(needle);
+    if (idx === -1) return;
+    // Preserve cursor when the placeholder is not where the user is typing.
+    const selStart = textarea.selectionStart;
+    const selEnd = textarea.selectionEnd;
+    textarea.value = textarea.value.substring(0, idx) + replacement + textarea.value.substring(idx + needle.length);
+    const delta = replacement.length - needle.length;
+    if (selStart > idx + needle.length) {
+      textarea.selectionStart = selStart + delta;
+      textarea.selectionEnd = selEnd + delta;
+    } else if (selStart >= idx) {
+      // Cursor was inside the placeholder — drop it just after the replacement.
+      textarea.selectionStart = textarea.selectionEnd = idx + replacement.length;
+    }
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   // ===== Comment Form =====
   function createCommentFormUI(opts) {
     const formObj = opts.formObj;
@@ -4565,6 +4685,7 @@
     if (opts.initialBody) textarea.value = opts.initialBody;
 
     attachFilePicker(textarea);
+    attachImagePaste(textarea);
 
     const doSubmit = opts.onSubmit
       ? function() { opts.onSubmit(textarea.value); }

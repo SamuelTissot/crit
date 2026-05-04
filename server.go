@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -110,6 +111,16 @@ func NewServer(session *Session, frontendFS embed.FS, shareURL string, authToken
 	mux.HandleFunc("/api/file/diff", s.withReady(s.handleFileDiff))
 	mux.HandleFunc("/api/file/comments", s.withReady(s.handleFileComments))
 	mux.HandleFunc("/api/comment/", s.withReady(s.handleCommentByID))
+
+	// Attachment upload (POST) and serving (GET /api/attachments/{filename}).
+	// The trailing slash form ServeMux uses means the bare /api/attachments
+	// path is matched by the same handler; we route on method + presence of
+	// a suffix so both upload and fetch live in one place. Markdown stores
+	// the relative form `attachments/<uuid>.<ext>`; the frontend rewrites
+	// to /api/attachments/<uuid>.<ext> at render time so this URL space is
+	// only ever hit through the rewrite hook (or direct curl).
+	mux.HandleFunc("/api/attachments", s.withReady(s.handleAttachments))
+	mux.HandleFunc("/api/attachments/", s.withReady(s.handleAttachments))
 
 	// Static file serving (repo files need session; embedded assets do not)
 	mux.HandleFunc("/files/", s.withReady(s.handleFiles))
@@ -1560,6 +1571,128 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleAttachments dispatches both attachment upload (POST /api/attachments)
+// and fetch (GET /api/attachments/{filename}). Storage lives at
+// reviewPathsFor(s.reviewPath).Attachments so the v4 clearReviewFolder pass
+// removes attachments alongside review.json on cleanup.
+func (s *Server) handleAttachments(w http.ResponseWriter, r *http.Request) {
+	if s.reviewPath == "" {
+		http.Error(w, "Attachment storage unavailable (no review path)", http.StatusServiceUnavailable)
+		return
+	}
+
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/attachments")
+	suffix = strings.TrimPrefix(suffix, "/")
+
+	switch r.Method {
+	case http.MethodPost:
+		if suffix != "" {
+			http.Error(w, "POST takes no path suffix", http.StatusBadRequest)
+			return
+		}
+		s.handleAttachmentUpload(w, r)
+	case http.MethodGet:
+		if suffix == "" {
+			http.Error(w, "Filename required", http.StatusBadRequest)
+			return
+		}
+		s.handleAttachmentGet(w, r, suffix)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAttachmentUpload accepts a single multipart form field named "file"
+// containing image bytes. Validates MIME, persists via saveAttachment, and
+// returns the *relative* URL (`attachments/<uuid>.<ext>`) the frontend
+// should embed verbatim in the comment markdown — the source of truth in
+// review.json is the relative form, with each render target rewriting at
+// its own publish boundary.
+//
+// The original_filename is sanitized server-side and returned so the
+// frontend can use it as alt text without trusting raw upload metadata.
+func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	// Cap the entire request body. Multipart adds a small overhead beyond
+	// the raw image bytes; a generous +1MB ceiling keeps the math simple.
+	r.Body = http.MaxBytesReader(w, r.Body, maxAttachmentBytes+(1<<20))
+
+	if err := r.ParseMultipartForm(maxAttachmentBytes + (1 << 20)); err != nil {
+		http.Error(w, "Invalid multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Missing 'file' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Read up to maxAttachmentBytes+1 so we can detect overflow distinctly
+	// from a successful read at exactly the cap.
+	buf := make([]byte, maxAttachmentBytes+1)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		http.Error(w, "Read upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if n > maxAttachmentBytes {
+		http.Error(w, fmt.Sprintf("Image too large (max %d bytes)", maxAttachmentBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
+	data := buf[:n]
+
+	filename, err := saveAttachment(s.reviewPath, data)
+	if err != nil {
+		// MIME rejections deserve 415; everything else is 400.
+		if strings.HasPrefix(err.Error(), "unsupported image type") {
+			http.Error(w, err.Error(), http.StatusUnsupportedMediaType)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// header may be nil if FormFile is called creatively in tests; guard.
+	originalFilename := ""
+	if header != nil {
+		originalFilename = sanitizeAttachmentAltText(header.Filename)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, map[string]string{
+		"filename":          filename,
+		"original_filename": originalFilename,
+		"url":               "attachments/" + filename,
+	})
+}
+
+// handleAttachmentGet serves a previously uploaded attachment by its UUID
+// filename. The filename regex makes path traversal impossible without the
+// caller having to look at r.URL.Path themselves.
+func (s *Server) handleAttachmentGet(w http.ResponseWriter, r *http.Request, filename string) {
+	path, mime, err := attachmentPathFor(s.reviewPath, filename)
+	if err != nil {
+		http.Error(w, "Invalid attachment filename", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.Error(w, "Attachment not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "Stat failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	// UUIDs are never reused; the bytes behind a URL never change.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, filename, info.ModTime(), f)
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
