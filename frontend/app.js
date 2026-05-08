@@ -43,7 +43,7 @@
   // pointing the browser at /api/attachments/<uuid>.<ext>. External URLs
   // (https/http/data/absolute paths) pass through untouched so historical
   // GitHub raw URLs or external image hosts still render after `crit pull`.
-  commentMd.renderer.rules.image = function(tokens, idx, options, env, self) {
+  commentMd.renderer.rules.image = function(tokens, idx, options, _env, self) {
     const token = tokens[idx];
     const srcIdx = token.attrIndex('src');
     if (srcIdx >= 0) {

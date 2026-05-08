@@ -61,9 +61,9 @@ func TestRandomUUID_Format(t *testing.T) {
 }
 
 func TestReviewPathsFor_Attachments(t *testing.T) {
-	identity := "/home/u/.crit/reviews/deadbeef"
+	identity := filepath.Join("home", "u", ".crit", "reviews", "deadbeef")
 	got := reviewPathsFor(identity).Attachments
-	want := "/home/u/.crit/reviews/deadbeef/attachments"
+	want := filepath.Join(identity, "attachments")
 	if got != want {
 		t.Errorf("Attachments = %q, want %q", got, want)
 	}
