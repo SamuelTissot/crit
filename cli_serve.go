@@ -356,6 +356,31 @@ func bindListener(host string, port int) (net.Listener, error) {
 	return nil, err
 }
 
+// resolveServeReviewPath computes the daemon's review folder so that
+// srv.reviewPath, the session-registry entry, session.ReviewFilePath, and
+// session.critJSONPath() (post applyPlanOverrides, which sets OutputDir = planDir)
+// all agree on one folder. Precedence: --output > --plan-dir > centralized
+// ~/.crit/reviews/<key>.
+//
+// Bug history: before the planDir branch was added, plan-mode daemons wrote
+// attachments to ~/.crit/reviews/<key>/attachments/ while review.json and the
+// share-payload inliner targeted <planDir>/.crit/ — pasted images turned into
+// [image: <alt>] placeholders on crit-web because the inliner couldn't find
+// the file on disk and silently left the raw attachments/<uuid> ref in place.
+func resolveServeReviewPath(outputDir, planDir, sessionKey string) string {
+	switch {
+	case outputDir != "":
+		abs, _ := filepath.Abs(outputDir)
+		return filepath.Join(abs, ".crit")
+	case planDir != "":
+		abs, _ := filepath.Abs(planDir)
+		return filepath.Join(abs, ".crit")
+	default:
+		path, _ := reviewFilePath(sessionKey)
+		return path
+	}
+}
+
 func serveSessionKey(sc *serverConfig) string {
 	cwd, _ := resolvedCWD()
 	if sc.planDir != "" {
@@ -418,12 +443,7 @@ func runServe(args []string) {
 	if vcs := DetectVCS(sc.vcsOverride); vcs != nil {
 		branch = vcs.CurrentBranch()
 	}
-	if sc.outputDir != "" {
-		abs, _ := filepath.Abs(sc.outputDir)
-		sc.reviewPath = filepath.Join(abs, ".crit")
-	} else {
-		sc.reviewPath, _ = reviewFilePath(key)
-	}
+	sc.reviewPath = resolveServeReviewPath(sc.outputDir, sc.planDir, key)
 	srv.reviewPath = sc.reviewPath
 	srv.cliArgs = sc.files
 	if err := writeSessionFile(key, sessionEntry{

@@ -1552,6 +1552,14 @@ body.dragging .line-comment-gutter.drag-range:not(.drag-endpoint) .line-add { op
   color: var(--crit-editor-fg-muted);
 }
 
+/* Highlight a textarea when an image file is being dragged over it.
+   Applied/removed by attachImageDragDrop in app.js. */
+textarea.drag-active {
+  outline: 2px dashed var(--crit-brand);
+  outline-offset: -2px;
+  background: var(--crit-brand-subtle);
+}
+
 .comment-form-actions {
   display: flex;
   justify-content: flex-end;

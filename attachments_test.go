@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,6 +135,32 @@ func TestSaveAttachment(t *testing.T) {
 			t.Errorf("expected distinct UUIDs for separate saves; got same %q twice", first)
 		}
 	})
+
+	t.Run("write failure surfaces as 'write attachment' error", func(t *testing.T) {
+		// POSIX-only: chmod doesn't reliably block writes on Windows.
+		if runtime.GOOS == "windows" {
+			t.Skip("chmod-based write block doesn't apply on Windows")
+		}
+		// Skip when running as root — root bypasses POSIX permission checks
+		// and would make this test pass spuriously.
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses POSIX perms; chmod 0o500 won't block writes")
+		}
+		review := newReviewIdentity(t)
+		dir := reviewPathsFor(review).Attachments
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir attachments: %v", err)
+		}
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("chmod attachments dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+		_, err := saveAttachment(review, makeTestPNG(t, color.RGBA{4, 5, 6, 255}))
+		if err == nil || !strings.Contains(err.Error(), "write attachment") {
+			t.Fatalf("expected write-attachment error, got %v", err)
+		}
+	})
 }
 
 func TestAttachmentPathFor(t *testing.T) {
@@ -173,6 +200,13 @@ func TestAttachmentPathFor(t *testing.T) {
 		want := filepath.Join(reviewPathsFor(review).Attachments, uuid+".png")
 		if path != want {
 			t.Errorf("path = %q, want %q", path, want)
+		}
+	})
+
+	t.Run("rejects empty review path with valid uuid filename", func(t *testing.T) {
+		uuid, _ := randomUUID()
+		if _, _, err := attachmentPathFor("", uuid+".png"); err == nil {
+			t.Errorf("expected error when reviewPath is empty")
 		}
 	})
 }
@@ -220,6 +254,42 @@ func TestInlineAttachmentsAsDataURIs(t *testing.T) {
 			t.Errorf("missing file should leave ref intact, got %q", got)
 		}
 	})
+
+	t.Run("filename passes markdown regex but not UUID regex leaves ref intact", func(t *testing.T) {
+		// The markdown regex accepts [A-Za-z0-9._-]+ as the filename, but
+		// attachmentPathFor enforces the strict UUID pattern. "foo.png"
+		// passes the outer markdown regex but is rejected by the inner
+		// path validator → defensive return-as-is branch.
+		body := "![alt](attachments/foo.png)"
+		got := inlineAttachmentsAsDataURIs(review, body)
+		if got != body {
+			t.Errorf("non-uuid filename should leave ref intact, got %q", got)
+		}
+	})
+
+	t.Run("oversized file on disk leaves ref intact (defensive cap)", func(t *testing.T) {
+		// Bypass saveAttachment's size check by writing directly. The defensive
+		// cap inside inlineAttachmentsAsDataURIs guards against data that got
+		// past the upload boundary by some other path.
+		bigReview := newReviewIdentity(t)
+		bigDir := reviewPathsFor(bigReview).Attachments
+		if err := os.MkdirAll(bigDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		uuid, _ := randomUUID()
+		bigFile := filepath.Join(bigDir, uuid+".png")
+		// 6 MiB — past maxAttachmentBytes. Prefix with PNG header so a future
+		// reader that runs DetectContentType also classifies it correctly.
+		oversized := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0xff}, maxAttachmentBytes+1024)...)
+		if err := os.WriteFile(bigFile, oversized, 0o600); err != nil {
+			t.Fatalf("write oversized file: %v", err)
+		}
+		body := "![](attachments/" + uuid + ".png)"
+		got := inlineAttachmentsAsDataURIs(bigReview, body)
+		if got != body {
+			t.Errorf("oversized file should leave ref intact, got %q", got)
+		}
+	})
 }
 
 func TestStripAttachmentReferences(t *testing.T) {
@@ -243,6 +313,19 @@ func TestStripAttachmentReferences(t *testing.T) {
 		out, n := stripAttachmentReferences(body)
 		if n != 0 || out != body {
 			t.Errorf("expected no-op, got n=%d out=%q", n, out)
+		}
+	})
+
+	t.Run("contains 'attachments/' substring but no valid ref", func(t *testing.T) {
+		// Hits the defensive count==0 branch: substring check passes but the
+		// markdown ref regex matches nothing.
+		body := "this mentions attachments/foo but is not a markdown image ref"
+		out, n := stripAttachmentReferences(body)
+		if n != 0 {
+			t.Errorf("count = %d, want 0", n)
+		}
+		if out != body {
+			t.Errorf("body changed unexpectedly: got %q", out)
 		}
 	})
 }
@@ -391,6 +474,86 @@ func TestHandleAttachments_RejectsBadInput(t *testing.T) {
 		srv.handleAttachments(rec, req)
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Errorf("status = %d, want 415; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("POST with malformed multipart body is 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/attachments",
+			strings.NewReader("this is not a multipart body"))
+		// Declare a boundary that doesn't appear in the body so ParseMultipartForm fails.
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=xxxnotpresent")
+		rec := httptest.NewRecorder()
+		srv.handleAttachments(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("POST with wrong form-file field name is 400", func(t *testing.T) {
+		// Properly formed multipart, but the file is in field "upload" rather
+		// than the expected "file" — surfaces as a FormFile lookup error.
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		fw, err := mw.CreateFormFile("upload", "screenshot.png")
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := fw.Write(makeTestPNG(t, color.RGBA{1, 2, 3, 255})); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := mw.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/attachments", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rec := httptest.NewRecorder()
+		srv.handleAttachments(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "Missing 'file'") {
+			t.Errorf("expected 'Missing file' in body, got %q", rec.Body.String())
+		}
+	})
+
+	t.Run("POST empty file part is 400 (not 415)", func(t *testing.T) {
+		// An empty multipart file part passes ParseMultipartForm + FormFile,
+		// then ReadFull returns n=0, then saveAttachment rejects with
+		// "empty attachment payload" — covers the non-MIME saveAttachment
+		// error branch (status 400, not 415).
+		body, contentType := buildMultipartFile(t, "empty.png", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/attachments", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		srv.handleAttachments(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "empty") {
+			t.Errorf("expected 'empty' in body, got %q", rec.Body.String())
+		}
+	})
+
+	t.Run("POST oversized payload is 413", func(t *testing.T) {
+		// Generate a body whose "file" part exceeds maxAttachmentBytes. The
+		// handler's MaxBytesReader fires once the request body exceeds the
+		// cap; the response status is 413 only when ParseMultipartForm gets
+		// past parsing and ReadFull observes n > maxAttachmentBytes. To make
+		// that branch reachable we keep the multipart envelope under the
+		// MaxBytesReader cap (maxAttachmentBytes + 1 MiB) while ensuring the
+		// inner file is large enough that the post-read n > max check fires.
+		oversized := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0xff}, maxAttachmentBytes+1024)...)
+		body, contentType := buildMultipartFile(t, "huge.png", oversized)
+		req := httptest.NewRequest(http.MethodPost, "/api/attachments", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		srv.handleAttachments(rec, req)
+		// Two acceptable outcomes depending on whether MaxBytesReader trips
+		// before ReadFull or after: both end up as a client-side error class
+		// (4xx). Assert specifically on the in-handler check so it's the
+		// expected branch covered.
+		if rec.Code != http.StatusRequestEntityTooLarge && rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 413 or 400; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }

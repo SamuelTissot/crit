@@ -4964,6 +4964,75 @@
     });
   }
 
+  // attachImageDragDrop wires drag-and-drop image uploads onto a textarea.
+  // Mirrors attachImagePaste's contract: filter for image/* files, route to
+  // uploadAndInsertImage, leave non-image drags to the browser's native
+  // text-drop behavior. dragover MUST preventDefault when we want to accept
+  // the drop — without it, the drop event never fires.
+  function attachImageDragDrop(textarea) {
+    function hasFiles(event) {
+      const dt = event.dataTransfer;
+      // dataTransfer.types is a DOMStringList; "Files" indicates an OS file
+      // drag. Text-only drags (selection drags, link drags) won't include it.
+      return !!(dt && dt.types && Array.prototype.indexOf.call(dt.types, 'Files') !== -1);
+    }
+
+    textarea.addEventListener('dragenter', function(event) {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      textarea.classList.add('drag-active');
+    });
+
+    textarea.addEventListener('dragover', function(event) {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      textarea.classList.add('drag-active');
+    });
+
+    textarea.addEventListener('dragleave', function(event) {
+      // Only clear when the drag truly leaves the textarea (not when crossing
+      // an internal selection boundary — textareas have no children, so we
+      // can rely on a simple class toggle without ref-counting).
+      if (event.target === textarea) {
+        textarea.classList.remove('drag-active');
+      }
+    });
+
+    textarea.addEventListener('drop', function(event) {
+      const dt = event.dataTransfer;
+      if (!dt || !dt.files || dt.files.length === 0) {
+        textarea.classList.remove('drag-active');
+        return;
+      }
+      const images = [];
+      for (let i = 0; i < dt.files.length; i++) {
+        const file = dt.files[i];
+        if (file && file.type && file.type.indexOf('image/') === 0) {
+          images.push(file);
+        }
+      }
+      if (images.length === 0) {
+        textarea.classList.remove('drag-active');
+        return;
+      }
+      // We're handling at least one image — claim the drop so the browser
+      // doesn't try to navigate to the dropped file URL.
+      event.preventDefault();
+      textarea.classList.remove('drag-active');
+      textarea.focus();
+      images.forEach(function(file) { uploadAndInsertImage(textarea, file); });
+    });
+  }
+
+  // Wires both paste and drag-drop image uploads onto a textarea. Single
+  // entry point so every comment textarea (top-level, edit, reply, reply edit)
+  // gets the same upload behavior.
+  function attachImageUploads(textarea) {
+    attachImagePaste(textarea);
+    attachImageDragDrop(textarea);
+  }
+
   function uploadAndInsertImage(textarea, file) {
     const seq = ++pendingImagePasteSeq;
     const placeholder = '![uploading…](crit-pending-' + seq + ')';
@@ -5046,7 +5115,7 @@
     if (opts.initialBody) textarea.value = opts.initialBody;
 
     attachFilePicker(textarea);
-    attachImagePaste(textarea);
+    attachImageUploads(textarea);
 
     const doSubmit = opts.onSubmit
       ? function() { opts.onSubmit(textarea.value); }
@@ -6433,6 +6502,7 @@
     textarea.value = currentText;
     textarea.rows = 3;
     bodyEl.replaceWith(textarea);
+    attachImageUploads(textarea);
     textarea.focus();
 
     const saveBtn = document.createElement('button');
@@ -6520,6 +6590,7 @@
     buttons.appendChild(submitBtn);
 
     attachFilePicker(textarea);
+    attachImageUploads(textarea);
 
     function expand() {
       if (form.classList.contains('expanded')) return;
