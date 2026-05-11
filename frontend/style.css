@@ -599,9 +599,35 @@ body {
 }
 
 .line-block.selected,
-.line-block.form-selected,
-.line-block.focused {
+.line-block.form-selected {
   background: var(--crit-brand-subtle);
+}
+
+.line-block.focused {
+  background: var(--crit-line-focus-bg);
+  box-shadow: inset 2px 0 0 var(--crit-brand);
+}
+
+/* Visual line mode: recolor the focused block's left accent so it's clearly
+   distinct from the default j/k cursor, signalling that j/k now extends the
+   selection instead of moving focus. Uses a dedicated --crit-visual-accent
+   so we don't conflate it with --crit-orange (modified-line indicator) or
+   --crit-yellow (modified-file badges, warning text).
+
+   Three render paths:
+   - markdown line-blocks: box-shadow inset (matches the default focus accent)
+   - unified diff lines: border-left-color (the .diff-line has a 3px transparent
+     left border that turns brand on focus; we override that color)
+   - split diff rows: border-left-color on the .diff-split-side children
+     (the row's focus accent lives on the side panels, not the row itself) */
+body.visual-mode .line-block.focused {
+  box-shadow: inset 3px 0 0 var(--crit-visual-accent);
+}
+body.visual-mode .diff-container.unified .diff-line.focused {
+  border-left-color: var(--crit-visual-accent);
+}
+body.visual-mode .diff-split-row.focused .diff-split-side {
+  border-left-color: var(--crit-visual-accent);
 }
 
 .line-block.line-block-added {
@@ -640,10 +666,6 @@ body {
 }
 .deletion-marker.change-flash {
   animation: change-flash 1s ease-out;
-}
-
-.diff-line.focused, .diff-split-row.focused {
-  background: var(--crit-brand-subtle);
 }
 
 /* ===== Gutter ===== */
@@ -953,6 +975,21 @@ body.dragging .line-comment-gutter.drag-range:not(.drag-endpoint) .line-add { op
 
 .line-content ul li {
   list-style-type: '  \2022  ';
+}
+
+/* Outer wrappers added when a nested list item is split into its own line block.
+   They preserve semantic nesting (so CSS indentation works) without rendering
+   their own bullet/marker. */
+.line-content ul.crit-list-wrapper,
+.line-content ol.crit-list-wrapper {
+  padding-left: 24px;
+  margin: 0;
+}
+.line-content li.crit-list-wrapper {
+  list-style: none;
+}
+.line-content ul.crit-list-wrapper > li.crit-list-wrapper {
+  list-style-type: none;
 }
 
 .line-content table {
@@ -1619,6 +1656,42 @@ body.dragging .line-comment-gutter.drag-range:not(.drag-endpoint) .line-add { op
   padding: 1px 5px;
   border-radius: 3px;
   white-space: nowrap;
+}
+
+/* ===== Comment Reference Chip ===== */
+.comment-ref {
+  font-family: var(--crit-font-mono);
+  font-size: 0.92em;
+  color: var(--crit-comment-ref-color);
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 1px;
+  margin: 0 -1px;
+  transition:
+    color var(--crit-dur-fast) var(--crit-ease),
+    background-color 1.6s var(--crit-ease),
+    box-shadow 1.6s var(--crit-ease);
+}
+.comment-ref:hover {
+  color: var(--crit-comment-ref-color-hover);
+  text-decoration: underline;
+  text-decoration-color: var(--crit-comment-ref-underline);
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.comment-ref:focus-visible {
+  outline: 2px solid var(--crit-comment-ref-color);
+  outline-offset: 2px;
+  text-decoration: none;
+}
+.comment-ref-flash {
+  animation: comment-ref-flash 1.6s var(--crit-ease);
+}
+@keyframes comment-ref-flash {
+  0%   { background-color: var(--crit-comment-ref-flash-bg); box-shadow: 0 0 0 2px var(--crit-comment-ref-flash-ring); }
+  15%  { background-color: var(--crit-comment-ref-flash-bg); box-shadow: 0 0 0 2px var(--crit-comment-ref-flash-ring); }
+  100% { background-color: transparent; box-shadow: 0 0 0 2px transparent; }
 }
 
 /* ===== Save Template Dialog ===== */
@@ -3719,6 +3792,14 @@ body.sidebar-resizing * {
 .diff-container.unified .diff-line.addition { background: var(--crit-diff-add-bg); }
 .diff-container.unified .diff-line.deletion { background: var(--crit-diff-del-bg); }
 .diff-container.unified .diff-line.has-comment { background: var(--crit-comment-range-bg); }
+.diff-container.unified .diff-line.focused {
+  background: var(--crit-line-focus-bg);
+  border-left-color: var(--crit-brand);
+}
+.diff-container.unified .diff-line.focused .diff-gutter-num:first-child,
+.diff-container.unified .diff-line.focused .diff-gutter-num:last-child {
+  background: var(--crit-line-focus-bg);
+}
 .diff-container.unified .diff-line.selected,
 .diff-container.unified .diff-line.form-selected { background: var(--crit-brand-subtle); }
 .diff-container.unified .diff-gutter {
@@ -3760,6 +3841,11 @@ body.sidebar-resizing * {
 .diff-split-side.empty { background: var(--crit-editor-bg-card); }
 .diff-split-side.selected,
 .diff-split-side.form-selected { background: var(--crit-brand-subtle); }
+.diff-split-row.focused .diff-split-side {
+  background: var(--crit-line-focus-bg);
+  border-left-color: var(--crit-brand);
+}
+.diff-split-row.focused .diff-split-side .diff-gutter-num { background: var(--crit-line-focus-bg); }
 .diff-split-side .diff-gutter-num { min-width: 44px; }
 .diff-split-side.deletion .diff-gutter-num { background: var(--crit-diff-del-gutter); }
 .diff-split-side.addition .diff-gutter-num { background: var(--crit-diff-add-gutter); }

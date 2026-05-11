@@ -26,6 +26,7 @@
   --crit-brand-hover:   #94bcfb;
   --crit-brand-subtle:  rgba(133, 170, 248, 0.10);
   --crit-brand-bg:      rgba(133, 170, 248, 0.15);
+  --crit-line-focus-bg: rgba(133, 170, 248, 0.10);
   --crit-brand-cta:       #406fcc;
   --crit-brand-cta-hover: #4574cc;
 
@@ -62,6 +63,9 @@
   --crit-orange: #ff9e64;
   --crit-yellow: #e0af68;
   --crit-purple: #a371f7;
+  /* Visual line mode cursor accent. Distinct from --crit-orange (modified
+     line indicator) and --crit-yellow (warning / modified badges). */
+  --crit-visual-accent: #e0af68;
 
   /* ---- Borders ---- */
   --crit-border:         #232632;
@@ -147,6 +151,13 @@
   --crit-quote-highlight-border: rgba(250, 200, 60, 0.4);
   --crit-qr-bg: #fff;
 
+  /* ---- Comment reference chip ---- */
+  --crit-comment-ref-color:       #85aaf8;
+  --crit-comment-ref-color-hover: #94bcfb;
+  --crit-comment-ref-underline:   rgba(133, 170, 248, 0.35);
+  --crit-comment-ref-flash-bg:    rgba(187, 128, 9, 0.35);
+  --crit-comment-ref-flash-ring:  rgba(187, 128, 9, 0.85);
+
   --author-0-bg: rgba(110,160,230,0.15);
   --author-0-border: rgba(110,160,230,0.35);
   --author-0-fg: #7ab0f0;
@@ -186,6 +197,7 @@
     --crit-brand-hover:   #396ec6;
     --crit-brand-subtle:  rgba(41,96,188,0.08);
     --crit-brand-bg:      rgba(41,96,188,0.12);
+    --crit-line-focus-bg: rgba(41,96,188,0.10);
     --crit-brand-cta:       #3a72d4;
     --crit-brand-cta-hover: #3568c8;
 
@@ -222,6 +234,9 @@
     --crit-orange: #bc4c00;
     --crit-yellow: #7a5800;
     --crit-purple: #8250df;
+    /* Visual line mode cursor accent. Saturated amber tuned to read on
+       light backgrounds (the muddy --crit-yellow #7a5800 looks olive at 3px). */
+    --crit-visual-accent: #b8860b;
 
     /* ---- Borders ---- */
     --crit-border:         #d8dee4;
@@ -277,6 +292,13 @@
     --crit-quote-highlight-border: rgba(200, 160, 30, 0.45);
     --crit-qr-bg: #fff;
 
+    /* ---- Comment reference chip ---- */
+    --crit-comment-ref-color:       #0550ae;
+    --crit-comment-ref-color-hover: #033d8b;
+    --crit-comment-ref-underline:   rgba(5, 80, 174, 0.50);
+    --crit-comment-ref-flash-bg:    rgba(255, 212, 59, 0.55);
+    --crit-comment-ref-flash-ring:  rgba(154, 103, 0, 0.70);
+
     --author-0-bg: rgba(26,95,160,0.10);
     --author-0-border: rgba(26,95,160,0.25);
     --author-0-fg: #1a5fa0;
@@ -316,6 +338,7 @@
   --crit-brand-hover:   #94bcfb;
   --crit-brand-subtle:  rgba(133, 170, 248, 0.10);
   --crit-brand-bg:      rgba(133, 170, 248, 0.15);
+  --crit-line-focus-bg: rgba(133, 170, 248, 0.10);
   --crit-brand-cta:       #406fcc;
   --crit-brand-cta-hover: #4574cc;
 
@@ -352,6 +375,9 @@
   --crit-orange: #ff9e64;
   --crit-yellow: #e0af68;
   --crit-purple: #a371f7;
+  /* Visual line mode cursor accent. Distinct from --crit-orange (modified
+     line indicator) and --crit-yellow (warning / modified badges). */
+  --crit-visual-accent: #e0af68;
 
   /* ---- Borders ---- */
   --crit-border:         #232632;
@@ -407,6 +433,13 @@
   --crit-quote-highlight-border: rgba(250, 200, 60, 0.4);
   --crit-qr-bg: #fff;
 
+  /* ---- Comment reference chip ---- */
+  --crit-comment-ref-color:       #85aaf8;
+  --crit-comment-ref-color-hover: #94bcfb;
+  --crit-comment-ref-underline:   rgba(133, 170, 248, 0.35);
+  --crit-comment-ref-flash-bg:    rgba(187, 128, 9, 0.35);
+  --crit-comment-ref-flash-ring:  rgba(187, 128, 9, 0.85);
+
   --author-0-bg: rgba(110,160,230,0.15);
   --author-0-border: rgba(110,160,230,0.35);
   --author-0-fg: #7ab0f0;
@@ -445,6 +478,7 @@
   --crit-brand-hover:   #396ec6;
   --crit-brand-subtle:  rgba(41,96,188,0.08);
   --crit-brand-bg:      rgba(41,96,188,0.12);
+  --crit-line-focus-bg: rgba(41,96,188,0.10);
   --crit-brand-cta:       #3a72d4;
   --crit-brand-cta-hover: #3568c8;
 
@@ -481,6 +515,9 @@
   --crit-orange: #bc4c00;
   --crit-yellow: #7a5800;
   --crit-purple: #8250df;
+  /* Visual line mode cursor accent. Saturated amber tuned to read on
+     light backgrounds (the muddy --crit-yellow #7a5800 looks olive at 3px). */
+  --crit-visual-accent: #b8860b;
 
   /* ---- Borders ---- */
   --crit-border:         #d8dee4;
@@ -535,6 +572,13 @@
   --crit-quote-highlight-bg:     rgba(250, 200, 60, 0.18);
   --crit-quote-highlight-border: rgba(200, 160, 30, 0.45);
   --crit-qr-bg: #fff;
+
+  /* ---- Comment reference chip ---- */
+  --crit-comment-ref-color:       #0550ae;
+  --crit-comment-ref-color-hover: #033d8b;
+  --crit-comment-ref-underline:   rgba(5, 80, 174, 0.50);
+  --crit-comment-ref-flash-bg:    rgba(255, 212, 59, 0.55);
+  --crit-comment-ref-flash-ring:  rgba(154, 103, 0, 0.70);
 
   --author-0-bg: rgba(26,95,160,0.10);
   --author-0-border: rgba(26,95,160,0.25);

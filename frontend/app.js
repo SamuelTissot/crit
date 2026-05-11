@@ -36,6 +36,73 @@
     return '<span class="file-ref">' + escapeHtml(path) + '</span>';
   };
 
+  // Override code_inline so backtick-wrapped comment IDs render as the same chip.
+  const defaultCodeInline = commentMd.renderer.rules.code_inline || function(tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options);
+  };
+  commentMd.renderer.rules.code_inline = function(tokens, idx, options, env, self) {
+    const content = tokens[idx].content;
+    if (/^(c|r|rp)_[a-f0-9]{6,}$/.test(content)) {
+      return '<span class="comment-ref comment-ref-code" data-ref-id="' + escapeHtml(content) + '">' + escapeHtml(content) + '</span>';
+    }
+    return defaultCodeInline(tokens, idx, options, env, self);
+  };
+
+  function linkifyCommentRefsInDom(el) {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+    const textNodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      // skip text inside code/pre elements and already-linked chips
+      if (node.parentNode.closest('code, pre, .comment-ref')) continue;
+      textNodes.push(node);
+    }
+    const re = /((?:c|r|rp)_[a-f0-9]{6,})/g;
+    textNodes.forEach(function(tn) {
+      if (!re.test(tn.nodeValue)) { re.lastIndex = 0; return; }
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0, m;
+      while ((m = re.exec(tn.nodeValue)) !== null) {
+        if (m.index > last) frag.appendChild(document.createTextNode(tn.nodeValue.slice(last, m.index)));
+        const span = document.createElement('span');
+        span.className = 'comment-ref';
+        span.dataset.refId = m[1];
+        span.textContent = m[1];
+        frag.appendChild(span);
+        last = m.index + m[0].length;
+      }
+      if (last < tn.nodeValue.length) frag.appendChild(document.createTextNode(tn.nodeValue.slice(last)));
+      tn.parentNode.replaceChild(frag, tn);
+    });
+  }
+
+  // Scroll/expand/flash a comment card located anywhere in the document, given just its id.
+  // Distinct from scrollToComment(commentId, filePath) below — that one needs filePath context.
+  function scrollToCommentRef(id) {
+    const card = document.querySelector('.comment-card[data-comment-id="' + CSS.escape(id) + '"]');
+    if (!card) return;
+    // Make sure any containing <details> file section is open
+    const section = card.closest('details');
+    if (section && !section.open) section.open = true;
+    if (card.classList.contains('collapsed')) {
+      card.classList.remove('collapsed');
+      if (typeof commentCollapseOverrides !== 'undefined') commentCollapseOverrides[id] = false;
+    }
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('comment-ref-flash');
+    void card.offsetWidth;
+    card.classList.add('comment-ref-flash');
+    setTimeout(function() { card.classList.remove('comment-ref-flash'); }, 1650);
+  }
+
+  document.addEventListener('click', function(e) {
+    const ref = e.target.closest && e.target.closest('.comment-ref');
+    if (!ref) return;
+    e.preventDefault();
+    scrollToCommentRef(ref.dataset.refId);
+  });
+
   // ===== Attachment Image Src Rewrite =====
   // Markdown stored in review.json uses canonical relative paths
   // (`attachments/<uuid>.<ext>`) — never absolute URLs. Each render target
@@ -378,6 +445,9 @@
   let focusedFilePath = null;
   let focusedElement = null; // currently focused navigable element
   let navElements = []; // cached .kb-nav list, rebuilt on render
+  // Vim-style visual line mode (entered with V).
+  // { kind: 'markdown'|'diff', filePath, anchorStartLine, anchorEndLine, anchorSide }
+  let visualMode = null;
   let changeGroups = [];      // [{elements: [DOM], filePath: string}]
   let currentChangeIdx = -1;
 
@@ -886,11 +956,12 @@
     if (!lang || !hljs.getLanguage(lang)) return null;
     try {
       const highlighted = hljs.highlight(file.content, { language: lang, ignoreIllegals: true }).value;
-      const lines = splitHighlightedCode(highlighted);
-      // Return 1-indexed: lines[1] = first line
+      const htmlLines = splitHighlightedCode(highlighted);
+      const rawLines = file.content.split('\n');
+      // Return 1-indexed: result[1] = first line
       const result = [null]; // index 0 unused
-      for (let i = 0; i < lines.length; i++) {
-        result.push(lines[i]);
+      for (let i = 0; i < htmlLines.length; i++) {
+        result.push({ html: htmlLines[i], raw: rawLines[i] });
       }
       return result;
     } catch {
@@ -900,12 +971,14 @@
 
   // Get highlighted HTML for a single diff line.
   // Uses pre-highlighted cache for new-side lines, falls back to per-line for old-side.
+  // The cache is keyed by working-tree line number, but in branch/staged/commit-pinned
+  // diffs the diff's NewNum may address a different revision. Verify the cached source
+  // line matches `content` before trusting the cache hit.
   function highlightDiffLine(content, lineNum, side, highlightCache, lang) {
-    // Try cache first (new-side lines: context and additions have NewNum mapped to file.content)
-    if (highlightCache && lineNum > 0 && side !== 'old' && highlightCache[lineNum]) {
-      return highlightCache[lineNum];
+    if (highlightCache && lineNum > 0 && side !== 'old') {
+      const entry = highlightCache[lineNum];
+      if (entry && entry.raw === content) return entry.html;
     }
-    // Fallback: highlight individual line
     if (lang && hljs.getLanguage(lang)) {
       try {
         return hljs.highlight(content, { language: lang, ignoreIllegals: true }).value;
@@ -965,8 +1038,9 @@
     for (let i = 0; i < lines.length; i++) {
       const lineNum = i + 1;
       let html;
-      if (file.highlightCache && file.highlightCache[lineNum]) {
-        html = '<code class="hljs">' + file.highlightCache[lineNum] + '</code>';
+      const cacheEntry = file.highlightCache ? file.highlightCache[lineNum] : null;
+      if (cacheEntry && cacheEntry.raw === (lines[i] || '')) {
+        html = '<code class="hljs">' + cacheEntry.html + '</code>';
       } else {
         html = '<code class="hljs">' + escapeHtml(lines[i] || '') + '</code>';
       }
@@ -1070,45 +1144,170 @@
   }
 
   // Handle a list token (bullet or ordered) — split into per-item blocks.
-  function handleListToken(tokens, i, token, md, blocks, sourceLines, coveredUpTo, blockEnd) {
+  // Recurses into nested lists so each nested item is independently commentable.
+  // Nested-item blocks are rendered with semantic nesting preserved
+  // (e.g. <ul><li><ul><li>content</li></ul></li></ul>) with outer wrappers
+  // marked .crit-list-wrapper so CSS suppresses their bullets.
+  function handleListToken(tokens, i, _token, md, blocks, sourceLines, coveredUpTo, blockEnd) {
     const listCloseIdx = findCloseToken(tokens, i);
-    const listTag = token.type === 'bullet_list_open' ? 'ul' : 'ol';
-    let j = i + 1;
 
-    while (j < listCloseIdx) {
-      if (tokens[j].type === 'list_item_open') {
-        const itemMap = tokens[j].map;
-        const itemCloseIdx = findCloseToken(tokens, j);
+    splitListInto(tokens, i, listCloseIdx, md, blocks, sourceLines, coveredUpTo, function(html) {
+      return html;
+    });
 
-        if (itemMap) {
-          addGapLineBlocks(blocks, sourceLines, coveredUpTo, itemMap[0]);
-          let effectiveEnd = itemMap[1];
-          while (effectiveEnd > itemMap[0] + 1 && sourceLines[effectiveEnd - 1].trim() === '') {
-            effectiveEnd--;
-          }
-
-          const itemTokens = tokens.slice(j, itemCloseIdx + 1);
-          const startAttr = listTag === 'ol' && tokens[j].info ? ' start="' + tokens[j].info + '"' : '';
-          const itemHtml = '<' + listTag + startAttr + '>' +
-            md.renderer.render(itemTokens, md.options, {}) +
-            '</' + listTag + '>';
-
-          blocks.push({
-            startLine: itemMap[0] + 1,
-            endLine: effectiveEnd,
-            html: itemHtml,
-            isEmpty: false
-          });
-          coveredUpTo = effectiveEnd;
-        }
-        j = itemCloseIdx + 1;
-      } else {
-        j++;
-      }
+    // After splitListInto, blocks have been pushed and coveredUpTo updated
+    // implicitly via the last block's endLine. Recompute coveredUpTo from blocks.
+    if (blocks.length > 0) {
+      coveredUpTo = Math.max(coveredUpTo, blocks[blocks.length - 1].endLine);
     }
 
     coveredUpTo = addGapLineBlocks(blocks, sourceLines, coveredUpTo, blockEnd);
     return { nextIndex: listCloseIdx + 1, coveredUpTo: coveredUpTo };
+  }
+
+  // Recursively split a list (between listOpenIdx and listCloseIdx) into blocks.
+  // `wrap(innerHtml)` wraps the innermost item HTML with any enclosing list/li
+  // chrome from outer (parent) lists, preserving semantic nesting.
+  // Pushes blocks to `blocks` and emits gap-line blocks between items.
+  // Returns the line number through which content has been emitted (last block's endLine).
+  function splitListInto(tokens, listOpenIdx, listCloseIdx, md, blocks, sourceLines, coveredUpTo, wrap) {
+    const listOpen = tokens[listOpenIdx];
+    const listTag = listOpen.type === 'bullet_list_open' ? 'ul' : 'ol';
+    let j = listOpenIdx + 1;
+
+    while (j < listCloseIdx) {
+      if (tokens[j].type !== 'list_item_open') { j++; continue; }
+      const itemOpenIdx = j;
+      const itemCloseIdx = findCloseToken(tokens, j);
+      const itemMap = tokens[itemOpenIdx].map;
+
+      if (!itemMap) { j = itemCloseIdx + 1; continue; }
+
+      addGapLineBlocks(blocks, sourceLines, coveredUpTo, itemMap[0]);
+      coveredUpTo = itemMap[0];
+
+      // Find nested lists within this item (direct children only).
+      const nestedRanges = findDirectNestedLists(tokens, itemOpenIdx, itemCloseIdx);
+
+      // For ordered lists, preserve numbering across split blocks via start=N.
+      // markdown-it stores the numeric marker on the list_item_open token's info.
+      const itemStartAttr = (listTag === 'ol' && tokens[itemOpenIdx].info)
+        ? ' start="' + tokens[itemOpenIdx].info + '"'
+        : '';
+
+      // The "lead" portion: tokens between item_open and the first nested list (or item_close).
+      const firstNested = nestedRanges.length > 0 ? nestedRanges[0] : null;
+      const leadEndTokenIdx = firstNested ? firstNested.openIdx : itemCloseIdx;
+
+      // Determine source-line range for the lead.
+      const leadStartLine = itemMap[0] + 1;
+      let leadEndLine;
+      if (firstNested) {
+        const nestedFirstMap = tokens[firstNested.openIdx].map;
+        leadEndLine = nestedFirstMap ? nestedFirstMap[0] : itemMap[1];
+      } else {
+        leadEndLine = itemMap[1];
+        // Trim trailing blank lines (markdown-it often claims a trailing blank).
+        while (leadEndLine > leadStartLine && sourceLines[leadEndLine - 1].trim() === '') {
+          leadEndLine--;
+        }
+      }
+
+      // Render lead content: re-use renderer over tokens [item_open .. leadEndTokenIdx-1] + item_close synthetic.
+      // Easiest: render the tokens between item_open+1 and leadEndTokenIdx (exclusive) as inline content,
+      // then wrap in <li>.
+      const leadInnerTokens = tokens.slice(itemOpenIdx + 1, leadEndTokenIdx);
+      const leadInnerHtml = md.renderer.render(leadInnerTokens, md.options, {});
+      const leadLiClass = tokens[itemOpenIdx].attrGet && tokens[itemOpenIdx].attrGet('class');
+      const leadLiAttr = leadLiClass ? ' class="' + escapeAttr(leadLiClass) + '"' : '';
+      const leadInnerWrapped = '<' + listTag + itemStartAttr + '>' +
+        '<li' + leadLiAttr + '>' + leadInnerHtml + '</li>' +
+        '</' + listTag + '>';
+
+      if (leadEndLine > leadStartLine - 1) {
+        blocks.push({
+          startLine: leadStartLine,
+          endLine: leadEndLine,
+          html: wrap(leadInnerWrapped),
+          isEmpty: false
+        });
+        coveredUpTo = leadEndLine;
+      }
+
+      // Recurse into each nested list. Build a wrap-fn that wraps the child HTML
+      // in this item's <listTag><li class="crit-list-wrapper">...</li></listTag>,
+      // then through the parent wrap.
+      for (let n = 0; n < nestedRanges.length; n++) {
+        const nested = nestedRanges[n];
+        const childWrap = function(innerHtml) {
+          // Outer wrappers: marker-suppressed <li> so we don't get phantom bullets.
+          return wrap(
+            '<' + listTag + ' class="crit-list-wrapper">' +
+            '<li class="crit-list-wrapper">' + innerHtml + '</li>' +
+            '</' + listTag + '>'
+          );
+        };
+        coveredUpTo = splitListInto(tokens, nested.openIdx, nested.closeIdx, md, blocks, sourceLines, coveredUpTo, childWrap);
+      }
+
+      // Trailing content after last nested list (rare): handle it as another lead-style block.
+      if (nestedRanges.length > 0) {
+        const lastNested = nestedRanges[nestedRanges.length - 1];
+        const trailStartTokenIdx = lastNested.closeIdx + 1;
+        if (trailStartTokenIdx < itemCloseIdx) {
+          // Find first mapped token for trailing source-line range.
+          const trailStartLine = coveredUpTo;
+          let trailEndLine = itemMap[1];
+          while (trailEndLine > trailStartLine && sourceLines[trailEndLine - 1].trim() === '') {
+            trailEndLine--;
+          }
+          if (trailEndLine > trailStartLine) {
+            const trailInnerTokens = tokens.slice(trailStartTokenIdx, itemCloseIdx);
+            const trailInnerHtml = md.renderer.render(trailInnerTokens, md.options, {});
+            const trailWrapped = '<' + listTag + '>' +
+              '<li>' + trailInnerHtml + '</li>' +
+              '</' + listTag + '>';
+            blocks.push({
+              startLine: trailStartLine + 1,
+              endLine: trailEndLine,
+              html: wrap(trailWrapped),
+              isEmpty: false
+            });
+            coveredUpTo = trailEndLine;
+          }
+        }
+      }
+
+      j = itemCloseIdx + 1;
+    }
+
+    return coveredUpTo;
+  }
+
+  // Find direct-child nested lists within an item (not lists nested inside paragraphs etc.).
+  // Returns array of {openIdx, closeIdx} for each direct nested list_open token.
+  function findDirectNestedLists(tokens, itemOpenIdx, itemCloseIdx) {
+    const result = [];
+    let depth = 0;
+    for (let k = itemOpenIdx + 1; k < itemCloseIdx; k++) {
+      const t = tokens[k];
+      if (t.nesting === 1) {
+        if (depth === 0 && (t.type === 'bullet_list_open' || t.type === 'ordered_list_open')) {
+          const closeIdx = findCloseToken(tokens, k);
+          result.push({ openIdx: k, closeIdx: closeIdx });
+          k = closeIdx; // skip past
+          continue;
+        }
+        depth++;
+      } else if (t.nesting === -1) {
+        if (depth > 0) depth--;
+      }
+    }
+    return result;
+  }
+
+  function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   }
 
   // Handle a table token — split into per-row blocks.
@@ -3887,6 +4086,168 @@
     return result;
   }
 
+  // ===== Visual Line Mode (vim-style) =====
+  // Anchors on the currently focused block; j/k extend the range; Esc clears it.
+  function enterVisualMode() {
+    if (!focusedElement) return false;
+    const fp = focusedElement.dataset.filePath || focusedElement.dataset.diffFilePath;
+    if (!fp) return false;
+
+    if (focusedElement.dataset.blockIndex !== undefined && focusedElement.dataset.startLine) {
+      const startLine = parseInt(focusedElement.dataset.startLine);
+      const endLine = parseInt(focusedElement.dataset.endLine);
+      visualMode = { kind: 'markdown', filePath: fp, anchorStartLine: startLine, anchorEndLine: endLine };
+      activeFilePath = fp;
+      selectionStart = startLine;
+      selectionEnd = endLine;
+      // Clear any stale unified-diff drag state so it can't bleed into render paths.
+      unifiedVisualStart = null;
+      unifiedVisualEnd = null;
+      document.body.classList.add('visual-mode');
+      refreshVisualSelectionVisuals(fp);
+      return true;
+    }
+    if (focusedElement.dataset.diffLineNum) {
+      // Split rows carry both sides — tagDiffLine on the row records whichever
+      // side existed first (left when present), but the user's intent is
+      // usually the right (new) side. Prefer right; fall back to left for
+      // deleted-only rows. Unified rows are single-side, so just read directly.
+      let lineNum, side;
+      if (focusedElement.classList.contains('diff-split-row')) {
+        const right = focusedElement.querySelector('.diff-split-side.right:not(.empty)');
+        if (right && right.dataset.diffLineNum) {
+          lineNum = parseInt(right.dataset.diffLineNum);
+          side = '';
+        } else {
+          const left = focusedElement.querySelector('.diff-split-side.left:not(.empty)');
+          if (!left || !left.dataset.diffLineNum) return false;
+          lineNum = parseInt(left.dataset.diffLineNum);
+          side = 'old';
+        }
+      } else {
+        lineNum = parseInt(focusedElement.dataset.diffLineNum);
+        side = focusedElement.dataset.diffSide || '';
+      }
+      visualMode = { kind: 'diff', filePath: fp, anchorStartLine: lineNum, anchorEndLine: lineNum, anchorSide: side };
+      activeFilePath = fp;
+      selectionStart = lineNum;
+      selectionEnd = lineNum;
+      document.body.classList.add('visual-mode');
+      refreshVisualSelectionVisuals(fp);
+      return true;
+    }
+    return false;
+  }
+
+  function exitVisualMode(clearSelection) {
+    if (!visualMode) return;
+    const fp = visualMode.filePath;
+    visualMode = null;
+    document.body.classList.remove('visual-mode');
+    if (clearSelection) {
+      selectionStart = null;
+      selectionEnd = null;
+      unifiedVisualStart = null;
+      unifiedVisualEnd = null;
+      activeFilePath = null;
+      if (fp) refreshVisualSelectionVisuals(fp);
+    }
+  }
+
+  // After j/k moves focus, extend the visual selection from the anchor to the new focus.
+  function extendVisualSelection() {
+    if (!visualMode || !focusedElement) return;
+    const fp = visualMode.kind === 'markdown'
+      ? focusedElement.dataset.filePath
+      : focusedElement.dataset.diffFilePath;
+    if (fp !== visualMode.filePath) {
+      // Crossed file boundary — exit visual mode (focus already moved by j/k).
+      exitVisualMode(true);
+      return;
+    }
+    if (visualMode.kind === 'markdown') {
+      if (focusedElement.dataset.blockIndex === undefined) return;
+      const sLine = parseInt(focusedElement.dataset.startLine);
+      const eLine = parseInt(focusedElement.dataset.endLine);
+      selectionStart = Math.min(visualMode.anchorStartLine, sLine);
+      selectionEnd = Math.max(visualMode.anchorEndLine, eLine);
+    } else {
+      // Find the line number on the anchor side. Split rows carry both sides
+      // (and the row's dataset.diffSide is whichever side was tagged first,
+      // which is unreliable for navigation), so query the child sides directly.
+      // Rows with no line on the anchor side (e.g. a deleted-only row when
+      // we anchored on the right) are skipped silently — selection stays put,
+      // visual mode stays active, focus continues moving with j/k.
+      let ln = null;
+      if (focusedElement.classList.contains('diff-split-row')) {
+        const sideSel = visualMode.anchorSide === 'old'
+          ? '.diff-split-side.left:not(.empty)'
+          : '.diff-split-side.right:not(.empty)';
+        const sideEl = focusedElement.querySelector(sideSel);
+        if (sideEl && sideEl.dataset.diffLineNum) {
+          ln = parseInt(sideEl.dataset.diffLineNum);
+        }
+      } else if (focusedElement.dataset.diffLineNum) {
+        // Unified mode — single-side per element, must match anchor.
+        const side = focusedElement.dataset.diffSide || '';
+        if (side !== visualMode.anchorSide) return;
+        ln = parseInt(focusedElement.dataset.diffLineNum);
+      }
+      if (ln === null) return;
+      selectionStart = Math.min(visualMode.anchorStartLine, ln);
+      selectionEnd = Math.max(visualMode.anchorEndLine, ln);
+    }
+    // Update .selected classes incrementally rather than re-rendering the whole
+    // file — re-rendering invalidates the focusedElement reference and trips
+    // the j/k stale-ref recovery (which can mis-resolve when blockIndex values
+    // collide across files).
+    refreshVisualSelectionVisuals(visualMode.filePath);
+  }
+
+  function refreshVisualSelectionVisuals(filePath) {
+    const section = document.getElementById('file-section-' + filePath);
+    if (!section) return;
+    const blocks = section.querySelectorAll('.line-block.kb-nav[data-file-path="' + filePath + '"]');
+    for (let i = 0; i < blocks.length; i++) {
+      const lb = blocks[i];
+      const sLine = parseInt(lb.dataset.startLine);
+      const eLine = parseInt(lb.dataset.endLine);
+      const inSel = selectionStart !== null && selectionEnd !== null
+        && sLine >= selectionStart && eLine <= selectionEnd;
+      lb.classList.toggle('selected', inSel);
+    }
+    // Split-mode diff sides: each side has its own line numbers + side tag.
+    // .selected only applies on the anchor-matching side (matches the render
+    // path in makeSplitRow, lines 3730 / 3772).
+    const splitSides = section.querySelectorAll('.diff-split-side[data-diff-file-path="' + filePath + '"]');
+    const anchorSide = visualMode && visualMode.kind === 'diff' ? visualMode.anchorSide : null;
+    for (let i = 0; i < splitSides.length; i++) {
+      const sEl = splitSides[i];
+      if (sEl.classList.contains('empty') || !sEl.dataset.diffLineNum) {
+        sEl.classList.toggle('selected', false);
+        continue;
+      }
+      const ln = parseInt(sEl.dataset.diffLineNum);
+      const side = sEl.dataset.diffSide || '';
+      const sideMatches = anchorSide === null || side === anchorSide;
+      const inSel = sideMatches && selectionStart !== null && selectionEnd !== null
+        && ln >= selectionStart && ln <= selectionEnd;
+      sEl.classList.toggle('selected', inSel);
+    }
+    // Unified-mode diff lines: single-side per element, side matches anchor.
+    const unifiedLines = section.querySelectorAll('.diff-container.unified .diff-line[data-diff-file-path="' + filePath + '"]');
+    for (let i = 0; i < unifiedLines.length; i++) {
+      const ul = unifiedLines[i];
+      if (!ul.dataset.diffLineNum) continue;
+      const ln = parseInt(ul.dataset.diffLineNum);
+      const side = ul.dataset.diffSide || '';
+      const sideMatches = anchorSide === null || side === anchorSide;
+      const inSel = sideMatches && selectionStart !== null && selectionEnd !== null
+        && ln >= selectionStart && ln <= selectionEnd;
+      ul.classList.toggle('selected', inSel);
+    }
+  }
+
   // ===== Gutter Drag Selection =====
   let dragState = null;
 
@@ -5184,6 +5545,7 @@
     const bodyEl = document.createElement('div');
     bodyEl.className = 'comment-body';
     bodyEl.innerHTML = commentMd.render(comment.body, filePath ? buildCommentEnv(comment, filePath) : undefined);
+    linkifyCommentRefsInDom(bodyEl);
 
     card.appendChild(header);
 
@@ -5380,6 +5742,7 @@
       replyBody.className = 'reply-body';
       replyBody.dataset.rawBody = reply.body;
       replyBody.innerHTML = commentMd.render(reply.body);
+      linkifyCommentRefsInDom(replyBody);
       replyEl.appendChild(replyBody);
 
       repliesContainer.appendChild(replyEl);
@@ -6725,6 +7088,7 @@
       const descBody = document.createElement('div');
       descBody.className = 'pr-panel-description-body';
       descBody.innerHTML = commentMd.render(pr.pr_body);
+      linkifyCommentRefsInDom(descBody);
       descSection.appendChild(descBody);
 
       body.appendChild(descSection);
@@ -8524,6 +8888,7 @@
       { label: 'Navigation', shortcuts: [
         { key: '<kbd>j</kbd>', action: 'Next block' },
         { key: '<kbd>k</kbd>', action: 'Previous block' },
+        { key: '<kbd>Shift</kbd>+<kbd>V</kbd>', action: 'Visual line mode (extend with j/k, then c to comment)' },
         { key: '<kbd>]</kbd>', action: 'Next comment' },
         { key: '<kbd>[</kbd>', action: 'Previous comment' },
         { key: '<kbd>n</kbd>', action: 'Next change', mode: 'file mode' },
@@ -8716,10 +9081,47 @@
           focusedFilePath = focusedElement.dataset.diffFilePath;
           focusedBlockIndex = null;
         }
+        if (visualMode) extendVisualSelection();
+        break;
+      }
+      case 'V': {
+        e.preventDefault();
+        if (visualMode) {
+          // Toggle off — preserve the focus on the current expansion point.
+          exitVisualMode(true);
+        } else {
+          enterVisualMode();
+        }
         break;
       }
       case 'c': {
         e.preventDefault();
+        // Visual mode: comment on the active selection.
+        if (visualMode && selectionStart !== null && selectionEnd !== null) {
+          const fp = visualMode.filePath;
+          if (visualMode.kind === 'markdown') {
+            const file = getFileByPath(fp);
+            if (file && file.lineBlocks) {
+              let lastBlockIndex = -1;
+              for (let i = 0; i < file.lineBlocks.length; i++) {
+                if (file.lineBlocks[i].startLine >= selectionStart && file.lineBlocks[i].endLine <= selectionEnd) {
+                  lastBlockIndex = i;
+                }
+              }
+              if (lastBlockIndex >= 0) {
+                visualMode = null;
+                document.body.classList.remove('visual-mode');
+                openForm({ filePath: fp, afterBlockIndex: lastBlockIndex, startLine: selectionStart, endLine: selectionEnd, editingId: null });
+              }
+            }
+          } else {
+            const side = visualMode.anchorSide;
+            visualMode = null;
+            document.body.classList.remove('visual-mode');
+            openForm({ filePath: fp, afterBlockIndex: null, startLine: selectionStart, endLine: selectionEnd, editingId: null, side: side || undefined });
+          }
+          return;
+        }
         // If text is selected, comment on the selection (with quote).
         // Otherwise fall back to the focused block.
         if (tryOpenFormFromSelection()) return;
@@ -8844,6 +9246,9 @@
         else if (activeForms.length > 0) {
           const form = activeForms[activeForms.length - 1];
           if (confirmDiscardCommentForm(form)) cancelComment(form);
+        }
+        else if (visualMode) {
+          exitVisualMode(true);
         }
         else if (selectionStart !== null) {
           const clearPath = activeFilePath;
